@@ -1,0 +1,9 @@
+{
+  "context": {
+    "fileFiltering": {
+      "respectGitIgnore": false,
+      "respectQwenIgnore": false
+    }
+  },
+  "$version": 2
+}

@@ -1,92 +1,158 @@
 package runtime
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 
-	"ignis-wasmtime/sdk/http" // To link our custom http host functions
+	"github.com/ignis-runtime/ignis-wasmtime/internal/runtime/host_functions"
 
 	"github.com/bytecodealliance/wasmtime-go/v41"
+	"github.com/google/uuid"
 )
 
-// Runtime encapsulates the Wasmtime environment for running a specific module.
-type Runtime struct {
-	engine *wasmtime.Engine
-	linker *wasmtime.Linker
-	store  *wasmtime.Store
-	module *wasmtime.Module
+const SharedMemDir = "/dev/shm"
+
+type Runtime interface {
+	Execute(ctx context.Context, fdrequest any) ([]byte, error)
+	Close(ctx context.Context) error
 }
 
-// Config holds configuration for the runtime.
-type Config struct {
-	WasmPath string
+// Session represents a single execution context.
+type Session struct {
+	ID           uuid.UUID
+	Args         []string
+	Engine       *wasmtime.Engine
+	Module       *wasmtime.Module
+	Stdin        *os.File
+	Stdout       *os.File
+	PreOpenedDir string
 }
 
-// NewRuntime creates and initializes a new custom runtime.
-func NewRuntime(config Config) (*Runtime, error) {
-	// 1. Basic Wasmtime and WASI setup
-	engine := wasmtime.NewEngine()
-	store := wasmtime.NewStore(engine)
-	linker := wasmtime.NewLinker(engine)
-
-	wasiConfig := wasmtime.NewWasiConfig()
-	wasiConfig.InheritStdout()
-	wasiConfig.InheritStderr()
-	store.SetWasi(wasiConfig)
-
-	// 2. Link standard WASI imports
-	if err := linker.DefineWasi(); err != nil {
-		return nil, err
-	}
-
-	// 3. Link our custom SDK's host functions
-	if err := http.Link(store, linker); err != nil {
-		return nil, err
-	}
-
-	// 4. Load and compile the guest WASM module
-	wasmBytes, err := os.ReadFile(config.WasmPath)
-	if err != nil {
-		return nil, err
-	}
-	module, err := wasmtime.NewModule(engine, wasmBytes)
+// NewSession is a constructor to ensure all resources are initialized correctly.
+func NewSession(id uuid.UUID, engine *wasmtime.Engine, module *wasmtime.Module, args []string) (*Session, error) {
+	stdin, stdout, err := CreateIoDescriptors(id)
 	if err != nil {
 		return nil, err
 	}
 
-	// 5. Return the configured runtime instance
-	return &Runtime{
-		engine: engine,
-		linker: linker,
-		store:  store,
-		module: module,
+	return &Session{
+		ID:     id,
+		Args:   args,
+		Engine: engine,
+		Module: module,
+		Stdin:  stdin,
+		Stdout: stdout,
 	}, nil
 }
 
-// Run executes the '_start' function of the loaded WASM module.
-func (r *Runtime) Run() error {
-	// Instantiate the module with the linker.
-	instance, err := r.linker.Instantiate(r.store, r.module)
-	if err != nil {
-		return err
+// CreateIoDescriptors generates deterministic file paths in /dev/shm for a session.
+func CreateIoDescriptors(id uuid.UUID) (stdin *os.File, stdout *os.File, err error) {
+	// Pattern includes the UUID and a suffix placeholder
+	stdinPattern := fmt.Sprintf("%s_stdin-*.tmp", id)
+	stdoutPattern := fmt.Sprintf("%s_stdout-*.tmp", id)
+
+	// Helper to clean up on failure
+	cleanup := func() {
+		if stdin != nil {
+			stdin.Close()
+			os.Remove(stdin.Name())
+		}
+		if stdout != nil {
+			stdout.Close()
+			os.Remove(stdout.Name())
+		}
 	}
 
-	// Find the _start function.
-	startFunc := instance.GetFunc(r.store, "_start")
-	if startFunc == nil {
-		return errors.New("_start function not found in module")
+	// os.CreateTemp handles the "*" randomization automatically
+	if stdin, err = os.CreateTemp(SharedMemDir, stdinPattern); err != nil {
+		return nil, nil, fmt.Errorf("stdin creation: %w", err)
 	}
 
-	// Call the _start function.
-	_, err = startFunc.Call(r.store)
+	if stdout, err = os.CreateTemp(SharedMemDir, stdoutPattern); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("stdout creation: %w", err)
+	}
 
-	// Handle the clean exit case for WASI command modules.
+	return stdin, stdout, nil
+}
+
+// NewStore configures the WASI environment and links host functions.
+func (s *Session) NewStore() (*wasmtime.Store, *wasmtime.Linker, error) {
+	store := wasmtime.NewStore(s.Engine)
+	linker := wasmtime.NewLinker(s.Engine)
+
+	wasiConfig := wasmtime.NewWasiConfig()
+	wasiConfig.SetStdinFile(s.Stdin.Name())
+	wasiConfig.SetStdoutFile(s.Stdout.Name())
+	wasiConfig.InheritStderr()
+	wasiConfig.InheritEnv()
+	wasiConfig.SetArgv(s.Args)
+
+	dir, err := s.getPreopenDir()
 	if err != nil {
-		if wasmtimeErr, ok := err.(*wasmtime.Error); ok {
-			if exitStatus, hasStatus := wasmtimeErr.ExitStatus(); hasStatus && exitStatus == 0 {
+		return nil, nil, err
+	}
+	wasiConfig.PreopenDir(dir, "/", wasmtime.DIR_READ, wasmtime.FILE_READ|wasmtime.FILE_WRITE)
+
+	store.SetWasi(wasiConfig)
+
+	if err := linker.DefineWasi(); err != nil {
+		return nil, nil, fmt.Errorf("wasi link: %w", err)
+	}
+
+	if err := host_functions.Link(store, linker); err != nil {
+		return nil, nil, fmt.Errorf("host functions link: %w", err)
+	}
+
+	return store, linker, nil
+}
+
+// Run executes the module. Note that for modern WASI, the Linker
+// often handles finding '_start' automatically during instantiation.
+func (s *Session) Run(store *wasmtime.Store, linker *wasmtime.Linker) error {
+	instance, err := linker.Instantiate(store, s.Module)
+	if err != nil {
+		return fmt.Errorf("instantiation failed: %w", err)
+	}
+
+	// Modern WASI check: some modules use _start, some use a default linker entry
+	start := instance.GetFunc(store, "_start")
+	if start == nil {
+		return errors.New("missing _start function")
+	}
+
+	_, err = start.Call(store)
+
+	// Check for WASI exit code 0 (which Go treats as an error)
+	if err != nil {
+		if exitErr, ok := err.(*wasmtime.Error); ok {
+			if code, ok := exitErr.ExitStatus(); ok && code == 0 {
 				return nil
 			}
 		}
+		return fmt.Errorf("execution error: %w", err)
 	}
-	return err // Return the actual error if it wasn't a clean exit
+
+	return nil
+}
+
+func (s *Session) getPreopenDir() (string, error) {
+	if s.PreOpenedDir != "" {
+		return s.PreOpenedDir, nil
+	}
+	return os.Getwd()
+}
+
+// Cleanup ensures /dev/shm doesn't leak memory.
+func (s *Session) Cleanup() {
+	if s.Stdin != nil {
+		s.Stdin.Close()
+		os.Remove(s.Stdin.Name())
+	}
+	if s.Stdout != nil {
+		s.Stdout.Close()
+		os.Remove(s.Stdout.Name())
+	}
 }

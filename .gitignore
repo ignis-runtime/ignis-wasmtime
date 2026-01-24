@@ -26,6 +26,8 @@ go.work.sum
 
 # intellij idea folder
 .idea/
-
 **/**.wasm
 **/node_modules/
+
+# runtimes
+!internal/runtime/js/qjs.wasm

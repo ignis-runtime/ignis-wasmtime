@@ -1,0 +1,6 @@
+[submodule "libs/wasmtime"]
+	path = libs/wasmtime
+	url = git@github.com:ignis-runtime/wasmtime.git
+[submodule "libs/wasmtime-go"]
+	path = libs/wasmtime-go
+	url = git@github.com:ignis-runtime/wasmtime-go.git
