@@ -1,0 +1,31 @@
+syntax = "proto3";
+package internal.proto;
+
+option go_package = "ignis-wasmtime/internal/proto";
+
+message FDRequest {
+  string method = 1;
+  map<string, HeaderFields> header = 2;
+  bytes body = 3;
+  int64 content_length = 4;
+  StringSlice transfer_encoding = 5;
+  string host = 6;
+  string remote_addr = 7;
+  string request_uri = 8;
+  string pattern = 9;
+}
+
+message FDResponse {
+  bytes body = 1;
+  int32 status_code = 2;
+  int32 length = 3;
+  map<string, HeaderFields> header = 4;
+}
+
+message HeaderFields {
+  repeated string fields = 1;
+}
+
+message StringSlice {
+  repeated string fields = 1;
+}
