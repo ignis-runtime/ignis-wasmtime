@@ -136,7 +136,7 @@ func HandleHome(c *gin.Context) {
 
 	funcMap := template.FuncMap{"lower": func(s string) string { return "get" }} // Simplified for this example
 	tmpl, _ := template.New("home").Funcs(funcMap).Parse(homeTemplate)
-	c.Header("Content-Type", "text/html")
+	c.Header("Content-Type", "text/html; charset=utf-8")
 	tmpl.Execute(c.Writer, gin.H{"Routes": routes})
 }
 
@@ -160,7 +160,7 @@ func HandleListFiles(c *gin.Context) {
 	}
 
 	tmpl, _ := template.New("files").Parse(filesTemplate)
-	c.Header("Content-Type", "text/html")
+	c.Header("Content-Type", "text/html; charset=utf-8")
 	tmpl.Execute(c.Writer, gin.H{"Path": pathToRead, "Files": fileEntries})
 }
 
