@@ -11,9 +11,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/ignis-runtime/go-sdk/sdk"
-
-	"github.com/gin-gonic/gin"
 )
 
 // --- Models & Data ---
@@ -74,7 +73,7 @@ const homeTemplate = `
             <tbody>
                 {{range .Routes}}
                 <tr>
-                    <td><span class="badge method-{{.Method | lower}}">{{.Method}}</span></td>
+                    <td><span class="badge method-get">{{.Method}}</span></td>
                     <td><a href="{{.Path}}"><code>{{.Path}}</code></a></td>
                     <td>{{.Description}}</td>
                 </tr>
@@ -125,28 +124,35 @@ const filesTemplate = `
 </html>
 `
 
+// --- Helpers ---
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
 // --- Handlers ---
 
-func HandleHome(c *gin.Context) {
+func HandleHome(w http.ResponseWriter, r *http.Request) {
 	routes := []RouteInfo{
 		{"GET", "/api/v1/", "This documentation page"},
 		{"GET", "/api/v1/user", "Retrieve all registered users"},
-		{"GET", "/api/v1/user/:id", "Retrieve a specific user by ID (e.g., /user/1)"},
+		{"GET", "/api/v1/user/{id}", "Retrieve a specific user by ID (e.g., /user/1)"},
 		{"GET", "/api/v1/joke", "Get a random dad joke from an external API"},
 		{"GET", "/api/v1/files", "Browse the server filesystem (FTP-style)"},
 	}
 
-	funcMap := template.FuncMap{"lower": func(s string) string { return "get" }} // Simplified for this example
-	tmpl, _ := template.New("home").Funcs(funcMap).Parse(homeTemplate)
-	c.Header("Content-Type", "text/html; charset=utf-8")
-	tmpl.Execute(c.Writer, gin.H{"Routes": routes})
+	tmpl, _ := template.New("home").Parse(homeTemplate)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	tmpl.Execute(w, map[string]any{"Routes": routes})
 }
 
-func HandleListFiles(c *gin.Context) {
+func HandleListFiles(w http.ResponseWriter, r *http.Request) {
 	pathToRead := "/"
 	files, err := os.ReadDir(pathToRead)
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -162,63 +168,55 @@ func HandleListFiles(c *gin.Context) {
 	}
 
 	tmpl, _ := template.New("files").Parse(filesTemplate)
-	c.Header("Content-Type", "text/html; charset=utf-8")
-	tmpl.Execute(c.Writer, gin.H{"Path": pathToRead, "Files": fileEntries})
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	tmpl.Execute(w, map[string]any{"Path": pathToRead, "Files": fileEntries})
 }
 
-func HandleGetUser(c *gin.Context) {
-	id, _ := strconv.Atoi(c.Param("id"))
+func HandleGetUser(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
 	user, ok := Users[id]
 	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
 		return
 	}
-	c.JSON(http.StatusOK, user)
+	writeJSON(w, http.StatusOK, user)
 }
 
-func HandleGetUsers(c *gin.Context) {
-	c.JSON(http.StatusOK, Users)
+func HandleGetUsers(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, Users)
 }
 
-func HandleJoke(c *gin.Context) {
+func HandleJoke(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	req, _ := http.NewRequest("GET", "https://icanhazdadjoke.com", nil)
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
 	defer resp.Body.Close()
 	var res map[string]any
 	json.NewDecoder(resp.Body).Decode(&res)
-	c.JSON(200, res)
+	writeJSON(w, 200, res)
 }
 
 // --- Main ---
 
 func main() {
-	gin.SetMode(gin.ReleaseMode)
-	router := gin.New()
+	r := chi.NewRouter()
 
-	v1 := router.Group("/api/v1")
-	{
-		// Home Route (Discovery)
-		v1.GET("/", HandleHome)
-
-		// Resource Routes
-		v1.GET("/user", HandleGetUsers)
-		v1.GET("/user/:id", HandleGetUser)
-		v1.GET("/joke", HandleJoke)
-
-		// File Browser Routes
-		v1.GET("/files", HandleListFiles)
-		v1.StaticFS("/static", http.Dir("/")) // Serve actual files
-
-		v1.GET("/favicon.ico", func(c *gin.Context) {
-			c.Status(204)
+	r.Route("/api/v1", func(r chi.Router) {
+		r.Get("/", HandleHome)
+		r.Get("/user", HandleGetUsers)
+		r.Get("/user/{id}", HandleGetUser)
+		r.Get("/joke", HandleJoke)
+		r.Get("/files", HandleListFiles)
+		r.Mount("/static", http.StripPrefix("/api/v1/static", http.FileServer(http.Dir("/"))))
+		r.Get("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(204)
 		})
-	}
+	})
 
-	sdk.Handle(router, nil)
+	sdk.Handle(r, nil)
 }
