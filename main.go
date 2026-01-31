@@ -4,19 +4,42 @@ import (
 	"fmt"
 	"log"
 
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
-
 	"github.com/ignis-runtime/ignis-wasmtime/api/rest/server"
 	"github.com/ignis-runtime/ignis-wasmtime/api/rest/v1/routes"
+	_ "github.com/ignis-runtime/ignis-wasmtime/docs"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/cache"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/config"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/models"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/repository"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/services"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/storage"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
+// @title Ignis Wasmtime API
+// @version 1.0
+// @description A serverless runtime for WebAssembly and JavaScript modules
+// @termsOfService http://swagger.io/terms/
+
+// @contact.name API Support
+// @contact.url http://www.swagger.io/support
+// @contact.email support@swagger.io
+
+// @license.name Apache 2.0
+// @license.url http://www.apache.org/licenses/LICENSE-2.0.html
+
+// @host localhost:8080
+// @BasePath /api/v1
+
+// @securityDefinitions.apikey BearerAuth
+// @in header
+// @name Authorization
+// @description Type "Bearer" followed by a space and then your personal token.
+//
+//go:generate swag init -g main.go --parseInternal --parseDependency --output docs
 func main() {
 	// Initialize configuration
 	cfg := config.GetConfig()
@@ -65,6 +88,9 @@ func main() {
 	// Initialize deploymentService
 	deployService := services.NewDeploymentService(deploymentRepository, s3Storage, cfg)
 	srv := server.NewServer(addr, redisCache, deployService)
+
+	// Register Swagger documentation and UI
+	srv.Engine.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
 	routes.RegisterRoutes(srv, deployService, redisCache)
 

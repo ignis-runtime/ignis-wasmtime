@@ -11,7 +11,11 @@ tcp-logger: proto
 proto:
 	@buf generate
 
+swagger:
+	@echo "Generating Swagger documentation..."
+	@go run github.com/swaggo/swag/cmd/swag@latest init --parseDependency --parseInternal
+
 clean:
 	rm -rf $(BUILD_DIR)
 
-.PHONY: example-go tcp-logger run proto setup-build build-wasmtime clean
+.PHONY: example-go tcp-logger run proto swagger setup-build build-wasmtime clean

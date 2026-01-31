@@ -1,0 +1,138 @@
+basePath: /api/v1
+definitions:
+  schemas.DeployResponse:
+    description: Deployment response
+    properties:
+      created_at:
+        description: Creation timestamp
+        type: string
+      hash:
+        description: Hash of the deployed file
+        type: string
+      id:
+        description: Unique identifier for the deployment
+        type: string
+      is_existing:
+        description: Indicates if this was an existing runtime with the same hash
+        type: boolean
+      runtime_type:
+        description: Type of runtime (js or wasm)
+        type: string
+      updated_at:
+        description: Last update timestamp
+        type: string
+    type: object
+  v1.APIError:
+    description: API Error Response
+    properties:
+      code:
+        type: integer
+      data: {}
+      err:
+        type: string
+    type: object
+  v1.APIResponse:
+    description: API Success Response
+    properties:
+      code:
+        type: integer
+      data: {}
+      msg:
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact:
+    email: support@swagger.io
+    name: API Support
+    url: http://www.swagger.io/support
+  description: A serverless runtime for WebAssembly and JavaScript modules
+  license:
+    name: Apache 2.0
+    url: http://www.apache.org/licenses/LICENSE-2.0.html
+  termsOfService: http://swagger.io/terms/
+  title: Ignis Wasmtime API
+  version: "1.0"
+paths:
+  /deploy:
+    get:
+      consumes:
+      - application/json
+      description: Retrieves a list of all deployed runtimes
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/v1.APIResponse'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/schemas.DeployResponse'
+                  type: array
+              type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/v1.APIError'
+      summary: List all deployments
+      tags:
+      - Deployments
+    post:
+      consumes:
+      - multipart/form-data
+      description: Creates a new runtime deployment with the provided file and configuration
+      parameters:
+      - description: Runtime type (js or wasm)
+        enum:
+        - js
+        - wasm
+        in: formData
+        name: runtime_type
+        required: true
+        type: string
+      - description: Runtime file to deploy
+        in: formData
+        name: file
+        required: true
+        type: file
+      - description: Preopened directory for WASI
+        in: formData
+        name: preopened_dir
+        type: string
+      - description: Arguments to pass to the runtime
+        in: formData
+        name: args[]
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/v1.APIResponse'
+            - properties:
+                data:
+                  $ref: '#/definitions/schemas.DeployResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/v1.APIError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/v1.APIError'
+      summary: Create a new deployment
+      tags:
+      - Deployments
+securityDefinitions:
+  BearerAuth:
+    description: Type "Bearer" followed by a space and then your personal token.
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

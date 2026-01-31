@@ -7,6 +7,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// APIError represents an error response from the API
+// @Description API Error Response
 type APIError struct {
 	Code int    `json:"code"`
 	Err  string `json:"err"`
@@ -17,6 +19,8 @@ func (e APIError) Error() string {
 	return e.Err
 }
 
+// APIResponse represents a success response from the API
+// @Description API Success Response
 type APIResponse struct {
 	Code int    `json:"code"`
 	Msg  string `json:"msg"`
