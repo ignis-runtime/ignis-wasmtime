@@ -22,19 +22,36 @@ type Server struct {
 	Engine             *gin.Engine
 	Cache              *cache.RedisCache
 	registeredRuntimes registeredRuntimesMap
+	runtimeHashLookup  map[string]uuid.UUID  // hash -> UUID lookup for O(1) retrieval
 }
 
 func (s *Server) RegisterRuntime(runtimeID uuid.UUID, runtimeConfig runtime.RuntimeConfig) {
 	s.registeredRuntimes[runtimeID] = runtimeConfig
+	s.runtimeHashLookup[runtimeConfig.GetHash()] = runtimeID
+}
+
+func (s *Server) FindRuntimeByHash(targetHash string) (uuid.UUID, bool) {
+	id, exists := s.runtimeHashLookup[targetHash]
+	return id, exists
+}
+
+func (s *Server) UnregisterRuntime(runtimeID uuid.UUID) {
+	if config, exists := s.registeredRuntimes[runtimeID]; exists {
+		// Remove the corresponding hash from the lookup map
+		delete(s.runtimeHashLookup, config.GetHash())
+		// Remove the runtime from the main map
+		delete(s.registeredRuntimes, runtimeID)
+	}
 }
 
 func NewServer(addr string, cache *cache.RedisCache) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	return &Server{
-		Addr:               addr,
-		Engine:             gin.Default(),
-		Cache:              cache,
-		registeredRuntimes: make(registeredRuntimesMap),
+		Addr:                addr,
+		Engine:              gin.Default(),
+		Cache:               cache,
+		registeredRuntimes:  make(registeredRuntimesMap),
+		runtimeHashLookup:   make(map[string]uuid.UUID),
 	}
 }
 func (s *Server) Run() error {

@@ -34,6 +34,7 @@ type runtimeConfig struct {
 	preopenedDir string
 	args         []string
 	cache        *cache.RedisCache
+	hash         string
 	err          error
 }
 
@@ -68,11 +69,18 @@ func (b *runtimeConfig) Type() models.RuntimeType {
 	return models.RuntimeTypeWASM
 }
 
+func (b *runtimeConfig) GetHash() string {
+	return b.hash
+}
+
 // Instantiate finalizes the construction and performs the heavy initialization
 func (b *runtimeConfig) Instantiate() (runtime.Runtime, error) {
 	if b.err != nil {
 		return nil, b.err
 	}
+
+	providedFileHash := xxhash.Sum64(b.wasmModule)
+	b.hash = strconv.FormatUint(providedFileHash, 32)
 
 	engine := wasmtime.NewEngine()
 

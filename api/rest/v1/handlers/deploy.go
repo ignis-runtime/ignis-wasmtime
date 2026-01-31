@@ -12,6 +12,7 @@ import (
 	"github.com/ignis-runtime/ignis-wasmtime/internal/runtime"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/runtime/js"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/runtime/wasm"
+	"github.com/ignis-runtime/ignis-wasmtime/internal/utils"
 )
 
 type DeployHandler struct {
@@ -31,13 +32,7 @@ func (d *DeployHandler) HandleDeploy(c *gin.Context) error {
 			Err:  "Bad Request",
 		}
 	}
-	id, err := uuid.NewUUID()
-	if err != nil {
-		return v1.APIError{
-			Code: http.StatusInternalServerError,
-			Err:  err.Error(),
-		}
-	}
+
 	file, err := req.File.Open()
 	if err != nil {
 		return v1.APIError{
@@ -47,6 +42,30 @@ func (d *DeployHandler) HandleDeploy(c *gin.Context) error {
 	}
 	defer file.Close()
 	filedata, err := io.ReadAll(file)
+	if err != nil {
+		return v1.APIError{
+			Code: http.StatusInternalServerError,
+			Err:  err.Error(),
+		}
+	}
+
+	// Calculate the hash based on the runtime type
+	targetHash := utils.GetHash(filedata)
+
+	// Check if a runtime with the same hash already exists
+	existingID, exists := d.server.FindRuntimeByHash(targetHash)
+	if exists {
+		return v1.APIResponse{
+			Code: http.StatusOK,
+			Msg:  "Runtime with same hash already exists",
+			Data: schemas.DeployResponse{
+				ID: existingID.String(),
+			},
+		}
+	}
+
+	// Create new runtime with a new UUID
+	id, err := uuid.NewUUID()
 	if err != nil {
 		return v1.APIError{
 			Code: http.StatusInternalServerError,

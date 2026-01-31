@@ -39,6 +39,7 @@ type runtimeConfig struct {
 	jsFile []byte
 	cache  *cache.RedisCache
 	err    error
+	hash   string
 }
 
 func NewRuntimeConfig(id uuid.UUID, jsFile []byte) *runtimeConfig {
@@ -63,11 +64,18 @@ func (b *runtimeConfig) Type() models.RuntimeType {
 	return models.RuntimeTypeJS
 }
 
+func (b *runtimeConfig) GetHash() string {
+	return b.hash
+}
+
 // Instantiate compiles the QuickJS module and initializes the session
 func (b *runtimeConfig) Instantiate() (runtime.Runtime, error) {
 	if b.err != nil {
 		return nil, b.err
 	}
+
+	providedFileHash := xxhash.Sum64(b.jsFile)
+	b.hash = strconv.FormatUint(providedFileHash, 32)
 
 	engine := wasmtime.NewEngine()
 
