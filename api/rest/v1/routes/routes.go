@@ -16,8 +16,15 @@ func deployRoutes(server *server.Server, router gin.IRoutes) {
 	deployHandler := handlers.NewDeployHandler(server)
 	router.POST("/deploy", v1.ErrorHandler(deployHandler.HandleDeploy))
 }
+
+func runtimeRoutes(server *server.Server, router gin.IRoutes) {
+	runtimeHandler := handlers.NewRuntimeHandler(server)
+	router.GET("/runtimes", v1.ErrorHandler(runtimeHandler.ListRuntimes))
+}
+
 func RegisterRoutes(server *server.Server) {
 	apiv1 := server.Engine.Group("/api/v1")
 	mainRoutes(server, apiv1)
 	deployRoutes(server, apiv1)
+	runtimeRoutes(server, apiv1)
 }

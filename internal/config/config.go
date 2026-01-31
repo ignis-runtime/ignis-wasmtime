@@ -10,7 +10,18 @@ import (
 
 // Config holds the application's configuration.
 type Config struct {
-	RedisAddr string
+	RedisAddr        string
+	DBHost           string
+	DBPort           string
+	DBUser           string
+	DBPassword       string
+	DBName           string
+	DBSSLMode        string
+	S3Endpoint       string
+	S3AccessKeyID    string
+	S3SecretKey      string
+	S3BucketName     string
+	S3Region         string
 }
 
 var (
@@ -30,7 +41,18 @@ func GetConfig() *Config {
 		}
 
 		instance = &Config{
-			RedisAddr: getEnv("REDIS_ADDR", "localhost:6379"),
+			RedisAddr:        getEnv("REDIS_ADDR", "localhost:6379"),
+			DBHost:           getEnv("DB_HOST", "localhost"),
+			DBPort:           getEnv("DB_PORT", "5432"),
+			DBUser:           getEnv("DB_USER", "postgres"),
+			DBPassword:       getEnv("DB_PASSWORD", "postgres"),
+			DBName:           getEnv("DB_NAME", "postgres"),
+			DBSSLMode:        getEnv("DB_SSL_MODE", "disable"),
+			S3Endpoint:       getEnv("S3_ENDPOINT", ""),
+			S3AccessKeyID:    getEnv("S3_ACCESS_KEY_ID", ""),
+			S3SecretKey:      getEnv("S3_SECRET_KEY", ""),
+			S3BucketName:     getEnv("S3_BUCKET_NAME", ""),
+			S3Region:         getEnv("S3_REGION", "auto"),
 		}
 	})
 	return instance

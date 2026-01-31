@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -10,48 +11,50 @@ import (
 	"github.com/google/uuid"
 	v1 "github.com/ignis-runtime/ignis-wasmtime/api/rest/v1"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/cache"
+	"github.com/ignis-runtime/ignis-wasmtime/internal/repository"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/runtime"
+	"github.com/ignis-runtime/ignis-wasmtime/internal/runtime/js"
+	"github.com/ignis-runtime/ignis-wasmtime/internal/runtime/wasm"
+	"github.com/ignis-runtime/ignis-wasmtime/internal/storage"
 	"github.com/ignis-runtime/ignis-wasmtime/types"
 	"google.golang.org/protobuf/proto"
 )
 
-type registeredRuntimesMap map[uuid.UUID]runtime.RuntimeConfig
-
 type Server struct {
-	Addr               string
-	Engine             *gin.Engine
-	Cache              *cache.RedisCache
-	registeredRuntimes registeredRuntimesMap
-	runtimeHashLookup  map[string]uuid.UUID  // hash -> UUID lookup for O(1) retrieval
+	Addr        string
+	Engine      *gin.Engine
+	Cache       *cache.RedisCache
+	RuntimeRepo repository.RuntimeRepository
+	S3Storage   storage.S3Storage
 }
 
+// RegisterRuntime is now handled by the repository layer
+// This method can be removed or kept for compatibility with existing code
 func (s *Server) RegisterRuntime(runtimeID uuid.UUID, runtimeConfig runtime.RuntimeConfig) {
-	s.registeredRuntimes[runtimeID] = runtimeConfig
-	s.runtimeHashLookup[runtimeConfig.GetHash()] = runtimeID
+	// This method is deprecated. Use the repository directly instead.
 }
 
 func (s *Server) FindRuntimeByHash(targetHash string) (uuid.UUID, bool) {
-	id, exists := s.runtimeHashLookup[targetHash]
-	return id, exists
+	runtime, err := s.RuntimeRepo.FindByHash(targetHash)
+	if err != nil {
+		return uuid.Nil, false
+	}
+	return runtime.ID, true
 }
 
 func (s *Server) UnregisterRuntime(runtimeID uuid.UUID) {
-	if config, exists := s.registeredRuntimes[runtimeID]; exists {
-		// Remove the corresponding hash from the lookup map
-		delete(s.runtimeHashLookup, config.GetHash())
-		// Remove the runtime from the main map
-		delete(s.registeredRuntimes, runtimeID)
-	}
+	// Delete from the database
+	_ = s.RuntimeRepo.Delete(runtimeID)
 }
 
-func NewServer(addr string, cache *cache.RedisCache) *Server {
+func NewServer(addr string, cache *cache.RedisCache, runtimeRepo repository.RuntimeRepository, s3Storage storage.S3Storage) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	return &Server{
-		Addr:                addr,
-		Engine:              gin.Default(),
-		Cache:               cache,
-		registeredRuntimes:  make(registeredRuntimesMap),
-		runtimeHashLookup:   make(map[string]uuid.UUID),
+		Addr:        addr,
+		Engine:      gin.Default(),
+		Cache:       cache,
+		RuntimeRepo: runtimeRepo,
+		S3Storage:   s3Storage,
 	}
 }
 func (s *Server) Run() error {
@@ -68,12 +71,38 @@ func (s *Server) HandleWasmRequest(c *gin.Context) error {
 	}
 	id := uuid.MustParse(rawId)
 
-	// Get the appropriate rt from the factory
-	runtimeConfig, exists := s.registeredRuntimes[id]
-	if !exists {
+	// Get the runtime record from the database
+	runtimeRecord, err := s.RuntimeRepo.FindByID(id)
+	if err != nil {
 		return v1.APIError{
 			Code: http.StatusNotFound,
 			Err:  "specified runtime ID not found",
+		}
+	}
+
+	// Get the runtime file from local storage (or cache)
+	runtimeData, err := s.getRuntimeData(runtimeRecord.S3FilePath)
+	if err != nil {
+		return v1.APIError{
+			Code: http.StatusInternalServerError,
+			Err:  fmt.Sprintf("failed to get runtime data: %v", err),
+		}
+	}
+
+	// Create the appropriate runtime config based on runtime type
+	// Still need to provide cache for internal operations (like QJS module caching)
+	var runtimeConfig runtime.RuntimeConfig
+	switch runtimeRecord.RuntimeType {
+	case "js":
+		runtimeConfig = js.NewRuntimeConfig(id, runtimeData).WithCache(s.Cache)
+	case "wasm":
+		// For now, we'll create a basic config without args/preopened dir
+		// In a real implementation, you might want to store these in the DB too
+		runtimeConfig = wasm.NewRuntimeConfig(id, runtimeData).WithCache(s.Cache)
+	default:
+		return v1.APIError{
+			Code: http.StatusBadRequest,
+			Err:  "invalid runtime type",
 		}
 	}
 
@@ -174,4 +203,14 @@ func (s *Server) executeRuntimeCycle(c *gin.Context, rt runtime.Runtime) (*types
 	}
 
 	return &fdResponse, nil
+}
+
+// getRuntimeData retrieves runtime data from S3 storage
+func (s *Server) getRuntimeData(filePath string) ([]byte, error) {
+	// filePath is the S3 key
+	data, err := s.S3Storage.DownloadFile(context.Background(), "", filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download file from S3: %w", err)
+	}
+	return data, nil
 }
