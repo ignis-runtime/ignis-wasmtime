@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/ignis-runtime/ignis-wasmtime/types"
@@ -20,19 +21,19 @@ func NewRedisCache(addr string) *RedisCache {
 	return &RedisCache{client: rdb}
 }
 
-func (c *RedisCache) Get(ctx context.Context, key string) (*types.Module, error) {
+func (c *RedisCache) Get(ctx context.Context, key string) (*types.Module, bool) {
 	module := &types.Module{}
 	val, err := c.client.Get(ctx, key).Bytes()
-	if err == redis.Nil {
-		return nil, nil // Cache miss
+	if errors.Is(err, redis.Nil) {
+		return nil, false
 	} else if err != nil {
-		return nil, err
+		return nil, false
 	}
 	if err := proto.Unmarshal(val, module); err != nil {
-		return nil, err
+		return nil, false
 	}
 
-	return module, nil
+	return module, true
 }
 
 func (c *RedisCache) Set(ctx context.Context, key string, module *types.Module, expiration time.Duration) error {

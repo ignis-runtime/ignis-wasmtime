@@ -73,75 +73,66 @@ func (b *runtimeConfig) GetHash() string {
 	return b.hash
 }
 
+// getOrCompileModule attempts to fetch a pre-compiled WASM module from Redis
+// or compiles it from source if not found or if the hash has changed.
+func (b *runtimeConfig) getOrCompileModule(engine *wasmtime.Engine) (*wasmtime.Module, string, error) {
+	// 1. Prepare hashing and keys
+	rawHash := strconv.FormatUint(xxhash.Sum64(b.wasmModule), 16)
+	cacheKey := fmt.Sprintf(cacheKeyFormat, b.id)
+
+	// 2. Try Cache
+	cached, found := b.cache.Get(context.Background(), cacheKey)
+	if found && cached != nil {
+		// Validate hash integrity
+		if cached.Hash == rawHash {
+			module, err := wasmtime.NewModuleDeserialize(engine, cached.Data)
+			if err == nil {
+				return module, rawHash, nil
+			}
+			fmt.Printf("Cache deserialize error: %v\n", err)
+		} else {
+			fmt.Printf("Cache hash mismatch. Expected: %s, Got: %s\n", rawHash, cached.Hash)
+		}
+	}
+
+	// 3. Compile Fresh
+	module, err := wasmtime.NewModule(engine, b.wasmModule)
+	if err != nil {
+		return nil, "", fmt.Errorf("module compilation failed: %w", err)
+	}
+
+	// 4. Update Cache
+	if serialized, err := module.Serialize(); err == nil {
+		_ = b.cache.Set(context.Background(), cacheKey, &types.Module{
+			Hash: rawHash,
+			Data: serialized,
+		}, 24*time.Hour)
+	}
+
+	return module, rawHash, nil
+}
+
 // Instantiate finalizes the construction and performs the heavy initialization
 func (b *runtimeConfig) Instantiate() (runtime.Runtime, error) {
 	if b.err != nil {
 		return nil, b.err
 	}
-
-	providedFileHash := xxhash.Sum64(b.wasmModule)
-	b.hash = strconv.FormatUint(providedFileHash, 32)
-
+	if b.cache == nil {
+		return nil, fmt.Errorf("error: cache not provided when instantiating the runtime")
+	}
 	engine := wasmtime.NewEngine()
+
+	// Resolve the WASM Module (Cache or Compile)
+	module, moduleHash, err := b.getOrCompileModule(engine)
+	if err != nil {
+		return nil, err
+	}
+	b.hash = moduleHash // Update builder state
 
 	// Create the IO files in /dev/shm
 	stdinFile, stdoutFile, err := runtime.CreateIoDescriptors(b.id)
 	if err != nil {
 		return nil, fmt.Errorf("io setup failed: %w", err)
-	}
-	var module *wasmtime.Module
-	var cacheKey string
-	var hash string
-	if b.cache != nil {
-		hash = strconv.FormatUint(xxhash.Sum64(b.wasmModule), 16)
-		cacheKey = fmt.Sprintf(cacheKeyFormat, b.id) // Use session ID as cache key
-
-		cachedModule, err := b.cache.Get(context.Background(), cacheKey)
-		if err != nil {
-			// Log the error but proceed to compile
-			fmt.Printf("Cache get error: %v\n", err)
-		}
-
-		if cachedModule != nil {
-			// Check if the cached module hash matches the current module hash
-			if cachedModule.Hash == hash {
-				module, err = wasmtime.NewModuleDeserialize(engine, cachedModule.Data)
-				if err != nil {
-					fmt.Printf("Cache deserialize error: %v\n", err)
-				} else {
-					fmt.Printf("Using cached module for hash: %s\n", hash)
-				}
-			} else {
-				fmt.Printf("Cached module hash mismatch. Cached: %s, Current: %s\n", cachedModule.Hash, hash)
-			}
-		}
-	}
-
-	if module == nil {
-		var err error
-		module, err = wasmtime.NewModule(engine, b.wasmModule)
-		if err != nil {
-			stdinFile.Close()
-			stdoutFile.Close()
-			return nil, fmt.Errorf("module compilation failed: %w", err)
-		}
-
-		if b.cache != nil {
-			serializedModule, err := module.Serialize()
-			if err != nil {
-				fmt.Printf("Module serialize error: %v\n", err)
-			} else {
-				err := b.cache.Set(context.Background(), cacheKey, &types.Module{
-					Hash: hash,
-					Data: serializedModule,
-				}, 24*time.Hour)
-				if err != nil {
-					fmt.Printf("Cache set error: %v\n", err)
-				} else {
-					fmt.Printf("Cached module with hash: %s\n", hash)
-				}
-			}
-		}
 	}
 
 	return &WasmRuntime{

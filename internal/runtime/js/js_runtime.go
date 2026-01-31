@@ -9,10 +9,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/cespare/xxhash/v2"
-
 	"github.com/bytecodealliance/wasmtime-go/v41"
+	"github.com/cespare/xxhash/v2"
 	"github.com/google/uuid"
+	"github.com/ignis-runtime/ignis-wasmtime/internal/utils"
 
 	"github.com/ignis-runtime/ignis-wasmtime/internal/cache"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/models"
@@ -24,8 +24,9 @@ import (
 var QJSWasm []byte
 
 const (
-	cacheKeyFormat    = "js:%s"
-	defaultModulesDir = "./internal/runtime/js/modules"
+	cacheKeyFormat     = "js:%s"
+	defaultModulesDir  = "./internal/runtime/js/modules"
+	defaultQJSCacheKey = "quickjs-rt"
 )
 
 // RuntimeJS implements the Runtime interface for JavaScript execution using QuickJS
@@ -68,84 +69,73 @@ func (b *runtimeConfig) GetHash() string {
 	return b.hash
 }
 
+// getQuickJSRuntime handles the caching logic for the QuickJS WASM module
+func (b *runtimeConfig) getQuickJSRuntime(engine *wasmtime.Engine) (*wasmtime.Module, error) {
+	var module *wasmtime.Module
+	var err error
+	// 1. Attempt Cache Retrieval
+	cached, exists := b.cache.Get(context.Background(), defaultQJSCacheKey)
+	if !exists {
+		// 2. Compile Fresh
+		module, err = wasmtime.NewModule(engine, QJSWasm)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compile QuickJS: %w", err)
+		}
+		// 3. Update Cache
+		serialized, err := module.Serialize()
+		if err == nil {
+			_ = b.cache.Set(context.Background(), defaultQJSCacheKey, &types.Module{
+				Hash: utils.GetHash(serialized),
+				Data: serialized,
+			}, 24*time.Hour)
+		}
+	} else {
+		module, err = wasmtime.NewModuleDeserialize(engine, cached.Data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to deserialize QuickJS: %w", err)
+		}
+	}
+
+	return module, nil
+}
+
 // Instantiate compiles the QuickJS module and initializes the session
 func (b *runtimeConfig) Instantiate() (runtime.Runtime, error) {
+	if b.cache == nil {
+		return nil, fmt.Errorf("error: cache not provided when instantiating the runtime")
+	}
 	if b.err != nil {
 		return nil, b.err
 	}
 
-	providedFileHash := xxhash.Sum64(b.jsFile)
-	b.hash = strconv.FormatUint(providedFileHash, 32)
-
 	engine := wasmtime.NewEngine()
-
-	// Create deterministic IO descriptors
-	stdin, stdout, err := runtime.CreateIoDescriptors(b.id)
+	module, err := b.getQuickJSRuntime(engine)
 	if err != nil {
 		return nil, err
 	}
 
-	// Compile the embedded QuickJS WASM with caching
-	var module *wasmtime.Module
-	var cacheKey string
-	var hash string
+	stdin, stdout, err := runtime.CreateIoDescriptors(b.id)
+	if err != nil {
+		return nil, err
+	}
+	b.hash = strconv.FormatUint(xxhash.Sum64(b.jsFile), 16)
+	cacheKey := fmt.Sprintf(cacheKeyFormat, b.id)
 
-	if b.cache != nil {
-		hash = strconv.FormatUint(xxhash.Sum64(QJSWasm), 16)
-		cacheKey = fmt.Sprintf(cacheKeyFormat, b.id) // Use session ID as cache key
-
-		cachedModule, err := b.cache.Get(context.Background(), cacheKey)
-		if err != nil {
-			fmt.Printf("Cache get error: %v\n", err)
+	var jsFile []byte
+	cached, exists := b.cache.Get(context.Background(), cacheKey)
+	if !exists {
+		jsFile = b.jsFile
+		if err := b.cache.Set(context.Background(), cacheKey, &types.Module{Hash: utils.GetHash(jsFile), Data: jsFile}, 24*time.Hour); err != nil {
+			return nil, err
 		}
-
-		if cachedModule != nil {
-			// Check if the cached module hash matches the current module hash
-			if cachedModule.Hash == hash {
-				module, err = wasmtime.NewModuleDeserialize(engine, cachedModule.Data)
-				if err != nil {
-					fmt.Printf("Cache deserialize error: %v\n", err)
-				} else {
-					fmt.Printf("Using cached module for hash: %s\n", hash)
-				}
-			} else {
-				fmt.Printf("Cached module hash mismatch. Cached: %s, Current: %s\n", cachedModule.Hash, hash)
-			}
-		}
+	} else {
+		jsFile = cached.Data
 	}
 
-	if module == nil {
-		var err error
-		module, err = wasmtime.NewModule(engine, QJSWasm)
-		if err != nil {
-			stdin.Close()
-			stdout.Close()
-			return nil, fmt.Errorf("failed to compile QuickJS: %w", err)
-		}
-
-		if b.cache != nil {
-			serializedModule, err := module.Serialize()
-			if err != nil {
-				fmt.Printf("Module serialize error: %v\n", err)
-			} else {
-				err := b.cache.Set(context.Background(), cacheKey, &types.Module{
-					Hash: hash,
-					Data: serializedModule,
-				}, 24*time.Hour)
-				if err != nil {
-					fmt.Printf("Cache set error: %v\n", err)
-				} else {
-					fmt.Printf("Cached module with hash: %s\n", hash)
-				}
-			}
-		}
-	}
-
-	args := []string{" ", "-e", string(b.jsFile)}
 	return &RuntimeJS{
 		session: runtime.Session{
 			ID:           b.id,
-			Args:         args,
+			Args:         []string{" ", "-e", string(jsFile)},
 			Engine:       engine,
 			Module:       module,
 			Stdin:        stdin,
