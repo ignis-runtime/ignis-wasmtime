@@ -83,20 +83,25 @@ func (b *runtimeConfig) Instantiate() (runtime.Runtime, error) {
 	var hash string
 
 	if b.cache != nil {
-		if b.cache != nil {
-			hash = strconv.FormatUint(xxhash.Sum64(QJSWasm), 16)
-			cacheKey = fmt.Sprintf(cacheKeyFormat, b.id)
+		hash = strconv.FormatUint(xxhash.Sum64(QJSWasm), 16)
+		cacheKey = fmt.Sprintf(cacheKeyFormat, b.id) // Use session ID as cache key
 
-			cachedModule, err := b.cache.Get(context.Background(), cacheKey)
-			if err != nil {
-				fmt.Printf("Cache get error: %v\n", err)
-			}
+		cachedModule, err := b.cache.Get(context.Background(), cacheKey)
+		if err != nil {
+			fmt.Printf("Cache get error: %v\n", err)
+		}
 
-			if cachedModule != nil {
+		if cachedModule != nil {
+			// Check if the cached module hash matches the current module hash
+			if cachedModule.Hash == hash {
 				module, err = wasmtime.NewModuleDeserialize(engine, cachedModule.Data)
 				if err != nil {
 					fmt.Printf("Cache deserialize error: %v\n", err)
+				} else {
+					fmt.Printf("Using cached module for hash: %s\n", hash)
 				}
+			} else {
+				fmt.Printf("Cached module hash mismatch. Cached: %s, Current: %s\n", cachedModule.Hash, hash)
 			}
 		}
 	}
@@ -121,6 +126,8 @@ func (b *runtimeConfig) Instantiate() (runtime.Runtime, error) {
 				}, 24*time.Hour)
 				if err != nil {
 					fmt.Printf("Cache set error: %v\n", err)
+				} else {
+					fmt.Printf("Cached module with hash: %s\n", hash)
 				}
 			}
 		}
