@@ -1,12 +1,14 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/bytecodealliance/wasmtime-go/v41"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	v1 "github.com/ignis-runtime/ignis-wasmtime/api/rest/v1"
@@ -25,149 +27,149 @@ type RunHandlers struct {
 }
 
 func NewRunHandlers(cache *cache.RedisCache, deploymentService services.DeploymentService) *RunHandlers {
-	return &RunHandlers{
-		cache:             cache,
-		deploymentService: deploymentService,
+	return &RunHandlers{cache: cache, deploymentService: deploymentService}
+}
+
+// getSerializedModule abstracts the "Check Cache -> Compile -> Store Cache" workflow
+func (s *RunHandlers) getSerializedModule(ctx context.Context, cacheKey string, loader func() ([]byte, error)) ([]byte, error) {
+	if cached, exists := s.cache.Get(ctx, cacheKey); exists {
+		return cached.Data, nil
 	}
+
+	// Cache miss: Load raw bytes
+	raw, err := loader()
+	if err != nil {
+		return nil, err
+	}
+
+	// Compile and Serialize
+	engine := wasmtime.NewEngine()
+	module, err := wasmtime.NewModule(engine, raw)
+	if err != nil {
+		return nil, fmt.Errorf("compilation failed: %w", err)
+	}
+
+	serialized, err := module.Serialize()
+	if err != nil {
+		return nil, fmt.Errorf("serialization failed: %w", err)
+	}
+
+	// Async cache update to avoid blocking
+	_ = s.cache.Set(ctx, cacheKey, &types.Module{Hash: cacheKey, Data: serialized}, time.Hour*2)
+	return serialized, nil
 }
 
 func (s *RunHandlers) HandleWasmRequest(c *gin.Context) error {
-	rawId, exists := c.Params.Get("uuid")
-	if !exists {
-		return v1.APIError{
-			Code: http.StatusBadRequest,
-			Err:  "rt ID not found in context",
-		}
-	}
-	id := uuid.MustParse(rawId)
-	deploymentRecord, err := s.deploymentService.GetDeploymentByID(c.Request.Context(), id)
+	rawId := c.Param("uuid")
+	id, err := uuid.Parse(rawId)
 	if err != nil {
-		return v1.APIError{
-			Code: http.StatusInternalServerError,
-			Err:  err.Error(),
-		}
+		return v1.APIError{Code: http.StatusBadRequest, Err: "invalid UUID"}
 	}
 
-	runtimeData, err := s.deploymentService.GetDeploymentFileContentByUUID(c.Request.Context(), id)
+	deployment, err := s.deploymentService.GetDeploymentByID(c.Request.Context(), id)
 	if err != nil {
-		return v1.APIError{
-			Code: http.StatusNotFound,
-			Err:  "runtime ID not found",
-		}
+		return v1.APIError{Code: http.StatusInternalServerError, Err: err.Error()}
 	}
 
-	// Create the appropriate runtime config based on runtime type
-	// Still need to provide cache for internal operations (like QJS module caching)
-	var runtimeConfig runtime.RuntimeConfig
-	switch strings.ToLower(deploymentRecord.RuntimeType) {
+	var config runtime.RuntimeConfig
+
+	switch strings.ToLower(deployment.RuntimeType) {
 	case "js":
-		runtimeConfig = js.NewRuntimeConfig(id, runtimeData).WithCache(s.cache)
-	case "wasm":
-		// For now, we'll create a basic config without args/preopened dir
-		// In a real implementation, you might want to store these in the DB too
-		runtimeConfig = wasm.NewRuntimeConfig(id, runtimeData).WithCache(s.cache)
-	default:
-		return v1.APIError{
-			Code: http.StatusBadRequest,
-			Err:  "invalid runtime type",
-		}
-	}
-
-	rt, err := runtimeConfig.Instantiate()
-	if err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-	}
-	defer func() {
-		err := rt.Close(c.Request.Context())
+		// 1. Get/Compile QuickJS Engine
+		engineBytes, err := s.getSerializedModule(c, "qjs-serialized", func() ([]byte, error) {
+			return js.QJSWasm, nil
+		})
 		if err != nil {
-			log.Printf("error closing runtime: %v", err)
+			return v1.APIError{Code: http.StatusInternalServerError, Err: err.Error()}
 		}
-	}()
 
-	// Call the combined function
+		// 2. Get JS Script Source (Directly from cache or DB)
+		var jsFile []byte
+		if cached, exists := s.cache.Get(c, deployment.Hash); exists {
+			jsFile = cached.Data
+		} else {
+			jsFile, err = s.deploymentService.GetDeploymentFileContentByHash(c, deployment.Hash)
+			if err != nil {
+				return v1.APIError{Code: http.StatusInternalServerError, Err: err.Error()}
+			}
+			_ = s.cache.Set(c, deployment.Hash, &types.Module{Hash: deployment.Hash, Data: jsFile}, time.Hour*2)
+		}
+
+		config = js.NewRuntimeConfig(id).WithSerializedModule(engineBytes).WithJSFile(jsFile)
+
+	case "wasm":
+		// Get/Compile the specific WASM deployment
+		moduleBytes, err := s.getSerializedModule(c, deployment.Hash, func() ([]byte, error) {
+			return s.deploymentService.GetDeploymentFileContentByUUID(c, id)
+		})
+		if err != nil {
+			return v1.APIError{Code: http.StatusInternalServerError, Err: err.Error()}
+		}
+		config = wasm.NewRuntimeConfig(id).WithSerializedModule(moduleBytes)
+
+	default:
+		return v1.APIError{Code: http.StatusBadRequest, Err: "invalid runtime type"}
+	}
+
+	// Lifecycle execution
+	rt, err := config.Instantiate()
+	if err != nil {
+		return v1.APIError{Code: http.StatusInternalServerError, Err: err.Error()}
+	}
+	defer rt.Close(c.Request.Context())
+
 	fdResponse, err := s.executeRuntimeCycle(c, rt)
 	if err != nil {
-		return v1.APIError{
-			Code: http.StatusInternalServerError,
-			Err:  err.Error(),
-		}
+		return v1.APIError{Code: http.StatusInternalServerError, Err: err.Error()}
 	}
 
-	// Set HTTP status code
-	if fdResponse.StatusCode != 0 {
-		c.Status(int(fdResponse.StatusCode))
-	} else {
-		c.Status(http.StatusOK)
+	// Map FDResponse back to Gin Response
+	return s.writeResponse(c, fdResponse)
+}
+
+func (s *RunHandlers) writeResponse(c *gin.Context, res *types.FDResponse) error {
+	status := http.StatusOK
+	if res.StatusCode != 0 {
+		status = int(res.StatusCode)
 	}
 
-	// Set HTTP headers and write body
-	for key, values := range fdResponse.Header {
+	for key, values := range res.Header {
 		for _, value := range values.Fields {
 			c.Writer.Header().Add(key, value)
 		}
 	}
 
-	if len(fdResponse.Body) > 0 {
-		if _, err := c.Writer.Write(fdResponse.Body); err != nil {
-			return v1.APIError{
-				Code: http.StatusInternalServerError,
-				Err:  err.Error(),
-			}
-		}
-	}
+	c.Data(status, c.Writer.Header().Get("Content-Type"), res.Body)
 	return nil
 }
 
-// ExecuteRuntimeCycle orchestrates the conversion of the Gin request to Protobuf,
-// executes it within the provided runtime, and unmarshal the response.
 func (s *RunHandlers) executeRuntimeCycle(c *gin.Context, rt runtime.Runtime) (*types.FDResponse, error) {
-
-	strippedPath := c.Param("path")
-	if strippedPath == "" {
-		strippedPath = "/"
+	path := c.Param("path")
+	if path == "" {
+		path = "/"
 	}
 
-	// 1. Prepare the FDRequest from the incoming Gin/HTTP request
-	reqBody, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read request body: %v", err)
-	}
-
+	reqBody, _ := io.ReadAll(c.Request.Body)
 	fdRequest := &types.FDRequest{
 		Method:        c.Request.Method,
 		Body:          reqBody,
 		ContentLength: c.Request.ContentLength,
 		Host:          c.Request.Host,
 		RemoteAddr:    c.Request.RemoteAddr,
-		RequestUri:    strippedPath,
-		Pattern:       strippedPath,
+		RequestUri:    path,
 		Header:        make(map[string]*types.HeaderFields),
 	}
 
-	// Populate headers and Transfer-Encoding
-	for key, values := range c.Request.Header {
-		fdRequest.Header[key] = &types.HeaderFields{Fields: values}
-	}
-	if len(c.Request.TransferEncoding) > 0 {
-		fdRequest.TransferEncoding = &types.StringSlice{Fields: c.Request.TransferEncoding}
+	for k, v := range c.Request.Header {
+		fdRequest.Header[k] = &types.HeaderFields{Fields: v}
 	}
 
-	// 2. Serialize and Execute
-	reqBytes, err := proto.Marshal(fdRequest)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal FDRequest: %v", err)
-	}
-
+	reqBytes, _ := proto.Marshal(fdRequest)
 	respBytes, err := rt.Execute(c.Request.Context(), reqBytes)
 	if err != nil {
-		return nil, fmt.Errorf("runtime execution error: %v", err)
+		return nil, err
 	}
 
-	// 3. Unmarshal the result into an FDResponse
 	var fdResponse types.FDResponse
-	if err := proto.Unmarshal(respBytes, &fdResponse); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal FDResponse: %v", err)
-	}
-
-	return &fdResponse, nil
+	return &fdResponse, proto.Unmarshal(respBytes, &fdResponse)
 }

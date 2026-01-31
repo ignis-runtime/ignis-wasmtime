@@ -20,7 +20,6 @@ type Runtime interface {
 type RuntimeConfig interface {
 	Type() models.RuntimeType
 	Instantiate() (Runtime, error)
-	GetHash() string
 }
 
 // Session represents a single execution context.

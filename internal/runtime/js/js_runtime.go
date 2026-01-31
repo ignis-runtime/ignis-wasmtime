@@ -7,26 +7,20 @@ import (
 	"io"
 	"os"
 	"strconv"
-	"time"
 
 	"github.com/bytecodealliance/wasmtime-go/v41"
 	"github.com/cespare/xxhash/v2"
 	"github.com/google/uuid"
-	"github.com/ignis-runtime/ignis-wasmtime/internal/utils"
 
-	"github.com/ignis-runtime/ignis-wasmtime/internal/cache"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/models"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/runtime"
-	"github.com/ignis-runtime/ignis-wasmtime/types"
 )
 
 //go:embed qjs.wasm
 var QJSWasm []byte
 
 const (
-	cacheKeyFormat     = "js:%s"
-	defaultModulesDir  = "./internal/runtime/js/modules"
-	defaultQJSCacheKey = "quickjs-rt"
+	defaultModulesDir = "./internal/runtime/js/modules"
 )
 
 // RuntimeJS implements the Runtime interface for JavaScript execution using QuickJS
@@ -36,28 +30,31 @@ type RuntimeJS struct {
 
 // runtimeConfig handles the configuration for JS execution
 type runtimeConfig struct {
-	id     uuid.UUID
-	jsFile []byte
-	cache  *cache.RedisCache
-	err    error
-	hash   string
+	id               uuid.UUID
+	jsFile           []byte // The JavaScript source code
+	serializedModule []byte // Pre-compiled QuickJS .cwasm bytes
+	err              error
+	hash             string
 }
 
-func NewRuntimeConfig(id uuid.UUID, jsFile []byte) *runtimeConfig {
-	b := &runtimeConfig{id: id}
+// NewRuntimeConfig initializes a new builder with the required ID
+func NewRuntimeConfig(id uuid.UUID) *runtimeConfig {
 	if id == uuid.Nil {
-		b.err = fmt.Errorf("invalid UUID for JS runtime")
+		return &runtimeConfig{err: fmt.Errorf("invalid UUID for JS runtime")}
 	}
-	if jsFile == nil {
-		b.err = fmt.Errorf("no js file provided")
-	}
-	b.jsFile = jsFile
+	// We default the rawModule to the embedded QJSWasm so it works out of the box
+	return &runtimeConfig{id: id}
+}
 
+// WithJSFile provides the JavaScript source code to execute
+func (b *runtimeConfig) WithJSFile(jsFile []byte) *runtimeConfig {
+	b.jsFile = jsFile
 	return b
 }
 
-func (b *runtimeConfig) WithCache(cache *cache.RedisCache) *runtimeConfig {
-	b.cache = cache
+// WithSerializedModule provides the pre-compiled QuickJS engine bytes
+func (b *runtimeConfig) WithSerializedModule(data []byte) *runtimeConfig {
+	b.serializedModule = data
 	return b
 }
 
@@ -65,77 +62,47 @@ func (b *runtimeConfig) Type() models.RuntimeType {
 	return models.RuntimeTypeJS
 }
 
+// GetHash returns the hash of the JavaScript file (used for identifying the script)
 func (b *runtimeConfig) GetHash() string {
+	if b.hash == "" && b.jsFile != nil {
+		b.hash = strconv.FormatUint(xxhash.Sum64(b.jsFile), 16)
+	}
 	return b.hash
 }
 
-// getQuickJSRuntime handles the caching logic for the QuickJS WASM module
-func (b *runtimeConfig) getQuickJSRuntime(engine *wasmtime.Engine) (*wasmtime.Module, error) {
-	var module *wasmtime.Module
-	var err error
-	// 1. Attempt cache Retrieval
-	cached, exists := b.cache.Get(context.Background(), defaultQJSCacheKey)
-	if !exists {
-		// 2. Compile Fresh
-		module, err = wasmtime.NewModule(engine, QJSWasm)
-		if err != nil {
-			return nil, fmt.Errorf("failed to compile QuickJS: %w", err)
-		}
-		// 3. Update cache
-		serialized, err := module.Serialize()
-		if err == nil {
-			_ = b.cache.Set(context.Background(), defaultQJSCacheKey, &types.Module{
-				Hash: utils.GetHash(serialized),
-				Data: serialized,
-			}, 24*time.Hour)
-		}
-	} else {
-		module, err = wasmtime.NewModuleDeserialize(engine, cached.Data)
-		if err != nil {
-			return nil, fmt.Errorf("failed to deserialize QuickJS: %w", err)
-		}
-	}
-
-	return module, nil
-}
-
-// Instantiate compiles the QuickJS module and initializes the session
+// Instantiate initializes the QuickJS environment and prepares the session
 func (b *runtimeConfig) Instantiate() (runtime.Runtime, error) {
-	if b.cache == nil {
-		return nil, fmt.Errorf("error: cache not provided when instantiating the runtime")
-	}
 	if b.err != nil {
 		return nil, b.err
 	}
+	if len(b.jsFile) == 0 {
+		return nil, fmt.Errorf("no javascript source provided")
+	}
 
 	engine := wasmtime.NewEngine()
-	module, err := b.getQuickJSRuntime(engine)
-	if err != nil {
-		return nil, err
+	var module *wasmtime.Module
+	var err error
+
+	// 1. Attempt to use Serialized Module (QuickJS Engine Cache Hit)
+	if len(b.serializedModule) > 0 {
+		module, err = wasmtime.NewModuleDeserialize(engine, b.serializedModule)
+		if err != nil {
+			module = nil // Fallback to raw if deserialization fails
+		}
 	}
 
 	stdin, stdout, err := runtime.CreateIoDescriptors(b.id)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("io setup failed: %w", err)
 	}
-	b.hash = strconv.FormatUint(xxhash.Sum64(b.jsFile), 16)
-	cacheKey := fmt.Sprintf(cacheKeyFormat, b.id)
 
-	var jsFile []byte
-	cached, exists := b.cache.Get(context.Background(), cacheKey)
-	if !exists {
-		jsFile = b.jsFile
-		if err := b.cache.Set(context.Background(), cacheKey, &types.Module{Hash: utils.GetHash(jsFile), Data: jsFile}, 24*time.Hour); err != nil {
-			return nil, err
-		}
-	} else {
-		jsFile = cached.Data
-	}
+	// Prepare the command line arguments for QuickJS: ["qjs", "-e", "<script_content>"]
+	args := []string{"qjs", "-e", string(b.jsFile)}
 
 	return &RuntimeJS{
 		session: runtime.Session{
 			ID:           b.id,
-			Args:         []string{" ", "-e", string(jsFile)},
+			Args:         args,
 			Engine:       engine,
 			Module:       module,
 			Stdin:        stdin,
@@ -160,9 +127,9 @@ func (r *RuntimeJS) Execute(ctx context.Context, fdRequest any) ([]byte, error) 
 	if _, err := r.session.Stdin.Write(reqBytes); err != nil {
 		return nil, fmt.Errorf("failed to write to JS stdin: %w", err)
 	}
-	r.session.Stdin.Sync()
+	_ = r.session.Stdin.Sync()
 
-	// Setup Store & Linker (utilizing the logic in runtime/session.go)
+	// Setup Store & Linker
 	store, linker, err := r.session.NewStore()
 	if err != nil {
 		return nil, err
