@@ -7,21 +7,17 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	v1 "github.com/ignis-runtime/ignis-wasmtime/api/rest/v1"
-	"github.com/ignis-runtime/ignis-wasmtime/internal/cache"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/services"
 	"github.com/ignis-runtime/ignis-wasmtime/types"
 )
 
 type RunHandlers struct {
-	cache             *cache.RedisCache
 	deploymentService services.DeploymentService
 	runService        services.RunService
 }
 
-func NewRunHandlers(cache *cache.RedisCache, deploymentService services.DeploymentService) *RunHandlers {
-	runService := services.NewRunService(cache, deploymentService)
+func NewRunHandlers(runService services.RunService, deploymentService services.DeploymentService) *RunHandlers {
 	return &RunHandlers{
-		cache:             cache,
 		deploymentService: deploymentService,
 		runService:        runService,
 	}

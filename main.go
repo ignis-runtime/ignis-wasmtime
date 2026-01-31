@@ -87,12 +87,14 @@ func main() {
 
 	// Initialize deploymentService
 	deployService := services.NewDeploymentService(deploymentRepository, s3Storage, cfg)
+	runService := services.NewRunService(redisCache, deployService)
+
 	srv := server.NewServer(addr, redisCache, deployService)
 
 	// Register Swagger documentation and UI
 	srv.Engine.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
-	routes.RegisterRoutes(srv, deployService, redisCache)
+	routes.RegisterRoutes(srv, runService, deployService, redisCache)
 
 	log.Printf("Starting Gin HTTP server on port %s", addr)
 	if err := srv.Run(); err != nil {

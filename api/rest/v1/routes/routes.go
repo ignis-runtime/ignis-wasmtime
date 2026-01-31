@@ -6,9 +6,9 @@ import (
 	"github.com/ignis-runtime/ignis-wasmtime/internal/services"
 )
 
-func RegisterRoutes(server *server.Server, deployService services.DeploymentService, cache *cache.RedisCache) {
+func RegisterRoutes(server *server.Server, runService services.RunService, deployService services.DeploymentService, cache *cache.RedisCache) {
 	apiV1 := server.Engine.Group("/api/v1")
 
-	runRoutes(deployService, cache, apiV1)
+	runRoutes(runService, deployService, apiV1)
 	deploymentRoutes(deployService, apiV1)
 }
