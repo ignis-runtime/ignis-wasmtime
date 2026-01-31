@@ -7,43 +7,46 @@ import (
 	"path/filepath"
 
 	"github.com/google/uuid"
-	"github.com/ignis-runtime/ignis-wasmtime/api/rest/server"
 	"github.com/ignis-runtime/ignis-wasmtime/api/rest/v1/schemas"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/config"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/models"
+	"github.com/ignis-runtime/ignis-wasmtime/internal/repository"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/storage"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/utils"
 )
 
-// DeployResult represents the result of a deployment operation
-type DeployResult struct {
-	Response   *schemas.DeployResponse
-	IsExisting bool // True if the deployment was an existing runtime with the same hash
+const (
+	s3PathFormat = "%s/%s.%s"
+)
+
+// DeploymentService defines the interface for deployment operations
+type DeploymentService interface {
+	CreateDeployment(context context.Context, req schemas.DeployRequest) (*schemas.DeployResponse, error)
+	GetDeploymentByID(context context.Context, id uuid.UUID) (*schemas.DeployResponse, error)
+	GetDeploymentByHash(context context.Context, hash string) (*schemas.DeployResponse, error)
+	ListAllDeployments(context.Context) ([]*schemas.DeployResponse, error)
+	GetDeploymentFileContentByUUID(context context.Context, id uuid.UUID) ([]byte, error)
+	GetDeploymentFileContentByHash(context context.Context, hash string) ([]byte, error)
 }
 
-// DeployService defines the interface for deployment operations
-type DeployService interface {
-	Deploy(req schemas.DeployRequest) (*DeployResult, error)
+// deploymentService implements the DeploymentService interface
+type deploymentService struct {
+	deploymentRepo repository.DeploymentRepository
+	config         *config.Config
+	s3Storage      storage.S3Storage
 }
 
-// deployService implements the DeployService interface
-type deployService struct {
-	server    *server.Server
-	config    *config.Config
-	s3Storage storage.S3Storage
-}
-
-// NewDeployService creates a new instance of DeployService
-func NewDeployService(server *server.Server, config *config.Config) DeployService {
-	return &deployService{
-		server:    server,
-		config:    config,
-		s3Storage: server.S3Storage,
+// NewDeploymentService creates a new instance of DeploymentService
+func NewDeploymentService(runtimeRepo repository.DeploymentRepository, s3Storage storage.S3Storage, config *config.Config) DeploymentService {
+	return &deploymentService{
+		deploymentRepo: runtimeRepo,
+		config:         config,
+		s3Storage:      s3Storage,
 	}
 }
 
 // Deploy handles the deployment logic
-func (ds *deployService) Deploy(req schemas.DeployRequest) (*DeployResult, error) {
+func (ds *deploymentService) CreateDeployment(context context.Context, req schemas.DeployRequest) (*schemas.DeployResponse, error) {
 	// Validate that only one file is provided
 	if req.File == nil {
 		return nil, fmt.Errorf("no file provided")
@@ -73,14 +76,17 @@ func (ds *deployService) Deploy(req schemas.DeployRequest) (*DeployResult, error
 	targetHash := utils.GetHash(filedata)
 
 	// Check if a runtime with the same hash already exists in the database
-	existingRuntime, err := ds.server.RuntimeRepo.FindByHash(targetHash)
-	if err == nil && existingRuntime != nil {
+	existingDeployment, err := ds.deploymentRepo.FindByHash(context, targetHash)
+	if err == nil && existingDeployment != nil {
 		// Runtime with same hash already exists
-		return &DeployResult{
-			Response: &schemas.DeployResponse{
-				ID: existingRuntime.ID.String(),
-			},
-			IsExisting: true,
+		return &schemas.DeployResponse{
+			ID:          existingDeployment.ID.String(),
+			IsExisting:  true,
+			RuntimeType: existingDeployment.RuntimeType,
+			Hash:        existingDeployment.Hash,
+			S3FilePath:  existingDeployment.S3FilePath,
+			CreatedAt:   existingDeployment.CreatedAt,
+			UpdatedAt:   existingDeployment.UpdatedAt,
 		}, nil
 	}
 
@@ -91,10 +97,10 @@ func (ds *deployService) Deploy(req schemas.DeployRequest) (*DeployResult, error
 	}
 
 	// Use S3 storage
-	key := id.String() + expectedExt
+	key := fmt.Sprintf(s3PathFormat, req.RuntimeType, id, expectedExt)
 
 	// Upload to S3
-	if err := ds.s3Storage.UploadFile(context.Background(), "", key, filedata); err != nil {
+	if err := ds.s3Storage.UploadFile(context, key, filedata); err != nil {
 		return nil, fmt.Errorf("failed to upload file to S3: %w", err)
 	}
 
@@ -106,19 +112,83 @@ func (ds *deployService) Deploy(req schemas.DeployRequest) (*DeployResult, error
 		S3FilePath:  key, // Store the S3 key in the database
 	}
 
-	if err := ds.server.RuntimeRepo.Create(runtimeRecord); err != nil {
+	createdRecord, err := ds.deploymentRepo.Create(context, runtimeRecord)
+	if err != nil {
 		// Clean up the file if DB insertion fails
 		// Delete from S3 if DB insertion fails
-		ds.s3Storage.DeleteFile(context.Background(), "", key)
+		err = ds.s3Storage.DeleteFile(context, key)
 		return nil, fmt.Errorf("failed to save runtime to database: %w", err)
 	}
 
-	return &DeployResult{
-		Response: &schemas.DeployResponse{
-			ID: id.String(),
-		},
-		IsExisting: false,
+	return &schemas.DeployResponse{
+		ID:          createdRecord.ID.String(),
+		IsExisting:  false,
+		RuntimeType: createdRecord.RuntimeType,
+		Hash:        createdRecord.Hash,
+		CreatedAt:   createdRecord.CreatedAt,
+		UpdatedAt:   createdRecord.UpdatedAt,
 	}, nil
+}
+
+func (ds *deploymentService) GetDeploymentByID(context context.Context, id uuid.UUID) (*schemas.DeployResponse, error) {
+	runtimeRecord, err := ds.deploymentRepo.FindByID(context, id)
+	if err != nil {
+		return nil, err
+	}
+	return &schemas.DeployResponse{
+		ID:          runtimeRecord.ID.String(),
+		RuntimeType: runtimeRecord.RuntimeType,
+		Hash:        runtimeRecord.Hash,
+		S3FilePath:  runtimeRecord.S3FilePath,
+		CreatedAt:   runtimeRecord.CreatedAt,
+		UpdatedAt:   runtimeRecord.UpdatedAt,
+	}, nil
+}
+func (ds *deploymentService) GetDeploymentByHash(context context.Context, hash string) (*schemas.DeployResponse, error) {
+	runtimeRecord, err := ds.deploymentRepo.FindByHash(context, hash)
+	if err != nil {
+		return nil, err
+	}
+	return &schemas.DeployResponse{
+		ID:          runtimeRecord.ID.String(),
+		RuntimeType: runtimeRecord.RuntimeType,
+		Hash:        runtimeRecord.Hash,
+		S3FilePath:  runtimeRecord.S3FilePath,
+		CreatedAt:   runtimeRecord.CreatedAt,
+		UpdatedAt:   runtimeRecord.UpdatedAt,
+	}, nil
+}
+func (ds *deploymentService) GetDeploymentFileContentByUUID(context context.Context, id uuid.UUID) ([]byte, error) {
+	res, err := ds.deploymentRepo.FindByID(context, id)
+	if err != nil {
+		return nil, err
+	}
+	return ds.s3Storage.DownloadFile(context, res.S3FilePath)
+}
+func (ds *deploymentService) ListAllDeployments(context context.Context) ([]*schemas.DeployResponse, error) {
+	var res []*schemas.DeployResponse
+	records, err := ds.deploymentRepo.GetAll(context)
+	if err != nil {
+		return nil, err
+	}
+	for _, record := range records {
+		res = append(res, &schemas.DeployResponse{
+			ID:          record.ID.String(),
+			RuntimeType: record.RuntimeType,
+			Hash:        record.Hash,
+			S3FilePath:  record.S3FilePath,
+			CreatedAt:   record.CreatedAt,
+			UpdatedAt:   record.UpdatedAt,
+		})
+	}
+	return res, nil
+}
+func (ds *deploymentService) GetDeploymentFileContentByHash(context context.Context, hash string) ([]byte, error) {
+	res, err := ds.deploymentRepo.FindByHash(context, hash)
+	if err != nil {
+		return nil, err
+	}
+	return ds.s3Storage.DownloadFile(context, res.S3FilePath)
 }
 
 // getFileExtensionForRuntimeType returns the expected file extension for a given runtime type

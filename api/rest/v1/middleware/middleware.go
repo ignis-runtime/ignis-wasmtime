@@ -19,9 +19,7 @@ func UUIDValidator() gin.HandlerFunc {
 			})
 			return
 		}
-
 		c.Set("uuid", parsedUUID)
-
 		c.Next()
 	}
 }

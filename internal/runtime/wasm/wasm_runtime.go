@@ -80,7 +80,7 @@ func (b *runtimeConfig) getOrCompileModule(engine *wasmtime.Engine) (*wasmtime.M
 	rawHash := strconv.FormatUint(xxhash.Sum64(b.wasmModule), 16)
 	cacheKey := fmt.Sprintf(cacheKeyFormat, b.id)
 
-	// 2. Try Cache
+	// 2. Try cache
 	cached, found := b.cache.Get(context.Background(), cacheKey)
 	if found && cached != nil {
 		// Validate hash integrity
@@ -89,9 +89,9 @@ func (b *runtimeConfig) getOrCompileModule(engine *wasmtime.Engine) (*wasmtime.M
 			if err == nil {
 				return module, rawHash, nil
 			}
-			fmt.Printf("Cache deserialize error: %v\n", err)
+			fmt.Printf("cache deserialize error: %v\n", err)
 		} else {
-			fmt.Printf("Cache hash mismatch. Expected: %s, Got: %s\n", rawHash, cached.Hash)
+			fmt.Printf("cache hash mismatch. Expected: %s, Got: %s\n", rawHash, cached.Hash)
 		}
 	}
 
@@ -101,7 +101,7 @@ func (b *runtimeConfig) getOrCompileModule(engine *wasmtime.Engine) (*wasmtime.M
 		return nil, "", fmt.Errorf("module compilation failed: %w", err)
 	}
 
-	// 4. Update Cache
+	// 4. Update cache
 	if serialized, err := module.Serialize(); err == nil {
 		_ = b.cache.Set(context.Background(), cacheKey, &types.Module{
 			Hash: rawHash,
@@ -122,7 +122,7 @@ func (b *runtimeConfig) Instantiate() (runtime.Runtime, error) {
 	}
 	engine := wasmtime.NewEngine()
 
-	// Resolve the WASM Module (Cache or Compile)
+	// Resolve the WASM Module (cache or Compile)
 	module, moduleHash, err := b.getOrCompileModule(engine)
 	if err != nil {
 		return nil, err

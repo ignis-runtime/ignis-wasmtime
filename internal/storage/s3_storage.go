@@ -3,10 +3,12 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -14,19 +16,17 @@ import (
 
 // S3Storage defines the interface for S3-compatible storage operations
 type S3Storage interface {
-	UploadFile(ctx context.Context, bucket, key string, fileData []byte) error
-	DownloadFile(ctx context.Context, bucket, key string) ([]byte, error)
-	DeleteFile(ctx context.Context, bucket, key string) error
-	FileExists(ctx context.Context, bucket, key string) (bool, error)
+	UploadFile(ctx context.Context, key string, fileData []byte) error
+	DownloadFile(ctx context.Context, key string) ([]byte, error)
+	DeleteFile(ctx context.Context, key string) error
+	FileExists(ctx context.Context, key string) (bool, error)
 }
 
-// s3Storage implements the S3Storage interface
 type s3Storage struct {
 	client *s3.Client
 	bucket string
 }
 
-// S3Config holds the configuration for S3 storage
 type S3Config struct {
 	Endpoint        string
 	AccessKeyID     string
@@ -35,115 +35,90 @@ type S3Config struct {
 	Region          string
 }
 
-// NewS3Storage creates a new instance of S3Storage
-func NewS3Storage(config S3Config) (S3Storage, error) {
-	// Create custom resolver for S3-compatible services like Cloudflare R2
-	customResolver := aws.EndpointResolverFunc(func(service, region string) (aws.Endpoint, error) {
-		return aws.Endpoint{
-			URL: config.Endpoint,
-		}, nil
-	})
-
-	// Create AWS configuration with custom credentials and endpoint
-	awsConfig := aws.Config{
-		Region: config.Region,
-		Credentials: credentials.NewStaticCredentialsProvider(
-			config.AccessKeyID,
-			config.SecretAccessKey,
-			"", // Session token not needed for R2
-		),
-		EndpointResolver: customResolver,
+func NewS3Storage(cfg S3Config) (S3Storage, error) {
+	// 1. Load the base configuration
+	// We use config.LoadDefaultConfig but override credentials and endpoint
+	awsCfg, err := config.LoadDefaultConfig(context.Background(),
+		config.WithRegion(cfg.Region),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			cfg.AccessKeyID,
+			cfg.SecretAccessKey,
+			"",
+		)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("unable to load SDK config: %w", err)
 	}
 
-	// Create S3 client
-	client := s3.NewFromConfig(awsConfig, func(o *s3.Options) {
-		o.UsePathStyle = true // Required for many S3-compatible services
+	// 2. Create S3 client with BaseEndpoint (the modern way to handle custom URLs)
+	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+		// UsePathStyle is required for R2 and most local S3-compat layers
+		o.UsePathStyle = true
+		if cfg.Endpoint != "" {
+			o.BaseEndpoint = aws.String(cfg.Endpoint)
+		}
 	})
 
 	return &s3Storage{
 		client: client,
-		bucket: config.BucketName,
+		bucket: cfg.BucketName,
 	}, nil
 }
 
-// UploadFile uploads a file to S3-compatible storage
-func (s *s3Storage) UploadFile(ctx context.Context, bucket, key string, fileData []byte) error {
-	if bucket == "" {
-		bucket = s.bucket
-	}
-
+func (s *s3Storage) UploadFile(ctx context.Context, key string, fileData []byte) error {
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(bucket),
+		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 		Body:   bytes.NewReader(fileData),
 	})
 	if err != nil {
-		return fmt.Errorf("failed to upload file to S3: %w", err)
+		return fmt.Errorf("upload failed: %w", err)
 	}
 
 	return nil
 }
 
-// DownloadFile downloads a file from S3-compatible storage
-func (s *s3Storage) DownloadFile(ctx context.Context, bucket, key string) ([]byte, error) {
-	if bucket == "" {
-		bucket = s.bucket
-	}
-
+func (s *s3Storage) DownloadFile(ctx context.Context, key string) ([]byte, error) {
 	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(bucket),
+		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		// Check if it's a NoSuchKey error
-		if _, ok := err.(*types.NoSuchKey); ok {
-			return nil, fmt.Errorf("file not found: %s/%s", bucket, key)
+		var nsk *types.NoSuchKey
+		if errors.As(err, &nsk) {
+			return nil, fmt.Errorf("file not found: %s", key)
 		}
-		return nil, fmt.Errorf("failed to download file from S3: %w", err)
+		return nil, fmt.Errorf("download failed: %w", err)
 	}
 	defer result.Body.Close()
 
-	data, err := io.ReadAll(result.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read downloaded file: %w", err)
-	}
-
-	return data, nil
+	return io.ReadAll(result.Body)
 }
 
-// DeleteFile deletes a file from S3-compatible storage
-func (s *s3Storage) DeleteFile(ctx context.Context, bucket, key string) error {
-	if bucket == "" {
-		bucket = s.bucket
-	}
-
+func (s *s3Storage) DeleteFile(ctx context.Context, key string) error {
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(bucket),
+		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return fmt.Errorf("failed to delete file from S3: %w", err)
+		return fmt.Errorf("delete failed: %w", err)
 	}
 
 	return nil
 }
 
-// FileExists checks if a file exists in S3-compatible storage
-func (s *s3Storage) FileExists(ctx context.Context, bucket, key string) (bool, error) {
-	if bucket == "" {
-		bucket = s.bucket
-	}
-
+func (s *s3Storage) FileExists(ctx context.Context, key string) (bool, error) {
 	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(bucket),
+		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		// Check if it's a NoSuchKey error
-		if _, ok := err.(*types.NoSuchKey); ok {
+		// S3 HeadObject returns 404 (NotFound) if it doesn't exist
+		var nfe *types.NotFound
+		if errors.As(err, &nfe) {
 			return false, nil
 		}
-		return false, fmt.Errorf("failed to check if file exists: %w", err)
+		return false, fmt.Errorf("existence check failed: %w", err)
 	}
 
 	return true, nil

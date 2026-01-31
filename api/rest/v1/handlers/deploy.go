@@ -1,31 +1,26 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/ignis-runtime/ignis-wasmtime/api/rest/server"
 	v1 "github.com/ignis-runtime/ignis-wasmtime/api/rest/v1"
 	"github.com/ignis-runtime/ignis-wasmtime/api/rest/v1/schemas"
-	"github.com/ignis-runtime/ignis-wasmtime/internal/config"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/services"
 )
 
 type DeployHandler struct {
-	server *server.Server
-	service services.DeployService
+	service services.DeploymentService
 }
 
-func NewDeployHandler(server *server.Server) *DeployHandler {
-	// Get the config instance
-	config := config.GetConfig()
+func NewDeployHandler(service services.DeploymentService) *DeployHandler {
 	return &DeployHandler{
-		server: server,
-		service: services.NewDeployService(server, config),
+		service: service,
 	}
 }
 
-func (d *DeployHandler) HandleDeploy(c *gin.Context) error {
+func (d *DeployHandler) HandleCreateDeployment(c *gin.Context) error {
 	var req schemas.DeployRequest
 	if err := c.ShouldBind(&req); err != nil {
 		return v1.APIError{
@@ -35,10 +30,11 @@ func (d *DeployHandler) HandleDeploy(c *gin.Context) error {
 	}
 
 	// Delegate the business logic to the service layer
-	result, err := d.service.Deploy(req)
+	result, err := d.service.CreateDeployment(c.Request.Context(), req)
 	if err != nil {
 		// Handle specific error types
-		if _, ok := err.(*services.InvalidRuntimeTypeError); ok {
+		var invalidRuntimeTypeError *services.InvalidRuntimeTypeError
+		if errors.As(err, &invalidRuntimeTypeError) {
 			return v1.APIError{
 				Code: http.StatusBadRequest,
 				Err:  err.Error(),
@@ -63,6 +59,22 @@ func (d *DeployHandler) HandleDeploy(c *gin.Context) error {
 	return v1.APIResponse{
 		Code: http.StatusOK,
 		Msg:  msg,
-		Data: *result.Response,
+		Data: result,
+	}
+}
+
+func (d *DeployHandler) HandleListDeployments(c *gin.Context) error {
+	deployments, err := d.service.ListAllDeployments(c.Request.Context())
+	if err != nil {
+		return v1.APIError{
+			Code: http.StatusInternalServerError,
+			Err:  "Failed to retrieve runtimes from database",
+		}
+	}
+
+	return v1.APIResponse{
+		Code: http.StatusOK,
+		Msg:  "Successfully retrieved runtimes",
+		Data: deployments,
 	}
 }

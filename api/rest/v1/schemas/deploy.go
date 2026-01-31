@@ -2,6 +2,7 @@ package schemas
 
 import (
 	"mime/multipart"
+	"time"
 )
 
 type DeployRequest struct {
@@ -12,5 +13,11 @@ type DeployRequest struct {
 }
 
 type DeployResponse struct {
-	ID string `json:"deployment_id"`
+	ID          string    `json:"id"`
+	IsExisting  bool      `json:"is_existing"`
+	RuntimeType string    `json:"runtime_type"`
+	Hash        string    `json:"hash"`
+	S3FilePath  string    `json:"-"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }

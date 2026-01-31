@@ -13,6 +13,7 @@ import (
 	"github.com/ignis-runtime/ignis-wasmtime/internal/config"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/models"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/repository"
+	"github.com/ignis-runtime/ignis-wasmtime/internal/services"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/storage"
 )
 
@@ -38,7 +39,7 @@ func main() {
 	}
 
 	// Initialize runtime repository
-	runtimeRepo := repository.NewRuntimeRepository(db)
+	deploymentRepository := repository.NewDeploymentRepository(db)
 
 	// Initialize S3 storage - it's required now
 	if cfg.S3Endpoint == "" || cfg.S3AccessKeyID == "" || cfg.S3SecretKey == "" || cfg.S3BucketName == "" {
@@ -60,8 +61,12 @@ func main() {
 	log.Println("S3 storage initialized successfully")
 
 	addr := ":8080"
-	srv := server.NewServer(addr, redisCache, runtimeRepo, s3Storage)
-	routes.RegisterRoutes(srv)
+
+	// Initialize deploymentService
+	deployService := services.NewDeploymentService(deploymentRepository, s3Storage, cfg)
+	srv := server.NewServer(addr, redisCache, deployService)
+
+	routes.RegisterRoutes(srv, deployService, redisCache)
 
 	log.Printf("Starting Gin HTTP server on port %s", addr)
 	if err := srv.Run(); err != nil {

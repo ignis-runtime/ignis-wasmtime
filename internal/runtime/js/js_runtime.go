@@ -73,7 +73,7 @@ func (b *runtimeConfig) GetHash() string {
 func (b *runtimeConfig) getQuickJSRuntime(engine *wasmtime.Engine) (*wasmtime.Module, error) {
 	var module *wasmtime.Module
 	var err error
-	// 1. Attempt Cache Retrieval
+	// 1. Attempt cache Retrieval
 	cached, exists := b.cache.Get(context.Background(), defaultQJSCacheKey)
 	if !exists {
 		// 2. Compile Fresh
@@ -81,7 +81,7 @@ func (b *runtimeConfig) getQuickJSRuntime(engine *wasmtime.Engine) (*wasmtime.Mo
 		if err != nil {
 			return nil, fmt.Errorf("failed to compile QuickJS: %w", err)
 		}
-		// 3. Update Cache
+		// 3. Update cache
 		serialized, err := module.Serialize()
 		if err == nil {
 			_ = b.cache.Set(context.Background(), defaultQJSCacheKey, &types.Module{
