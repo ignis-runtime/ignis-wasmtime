@@ -1,0 +1,77 @@
+package handlers
+
+import (
+	"io"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/ignis-runtime/ignis-wasmtime/api/rest/server"
+	v1 "github.com/ignis-runtime/ignis-wasmtime/api/rest/v1"
+	"github.com/ignis-runtime/ignis-wasmtime/api/rest/v1/schemas"
+	"github.com/ignis-runtime/ignis-wasmtime/internal/runtime"
+	"github.com/ignis-runtime/ignis-wasmtime/internal/runtime/js"
+	"github.com/ignis-runtime/ignis-wasmtime/internal/runtime/wasm"
+)
+
+type DeployHandler struct {
+	server *server.Server
+}
+
+func NewDeployHandler(server *server.Server) *DeployHandler {
+	return &DeployHandler{
+		server: server,
+	}
+}
+func (d *DeployHandler) HandleDeploy(c *gin.Context) error {
+	var req schemas.DeployRequest
+	if err := c.ShouldBind(&req); err != nil {
+		return v1.APIError{
+			Code: http.StatusBadRequest,
+			Err:  "Bad Request",
+		}
+	}
+	id, err := uuid.NewUUID()
+	if err != nil {
+		return v1.APIError{
+			Code: http.StatusInternalServerError,
+			Err:  err.Error(),
+		}
+	}
+	file, err := req.File.Open()
+	if err != nil {
+		return v1.APIError{
+			Code: http.StatusBadRequest,
+			Err:  err.Error(),
+		}
+	}
+	defer file.Close()
+	filedata, err := io.ReadAll(file)
+	if err != nil {
+		return v1.APIError{
+			Code: http.StatusInternalServerError,
+			Err:  err.Error(),
+		}
+	}
+
+	var config runtime.RuntimeConfig
+	switch req.RuntimeType {
+	case "js":
+		config = js.NewRuntimeConfig(id, filedata).WithCache(d.server.Cache)
+	case "wasm":
+		config = wasm.NewRuntimeConfig(id, filedata).WithArgs(req.Args).WithCache(d.server.Cache).WithPreopenedDir(req.PreopenedDir)
+	default:
+		return v1.APIError{
+			Code: http.StatusBadRequest,
+			Err:  "Invalid runtime type",
+		}
+	}
+	d.server.RegisterRuntime(id, config)
+	return v1.APIResponse{
+		Code: http.StatusOK,
+		Msg:  "Successfully deployed",
+		Data: schemas.DeployResponse{
+			ID: id.String(),
+		},
+	}
+}
