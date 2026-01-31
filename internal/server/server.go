@@ -60,7 +60,8 @@ func (s *Server) HandleWasmRequest(c *gin.Context) {
 	}
 	runtime, err := runtimeConfig.Instantiate()
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 	defer runtime.Close(c.Request.Context())
 
@@ -77,7 +78,8 @@ func (s *Server) HandleWasmRequest(c *gin.Context) {
 	log.Printf("Incoming path: %s, Runtime ID: %s, Forwarded path: %s", c.Request.URL.Path, runtimeUuid.String(), strippedPath)
 	fdResponse, err := prepareResponse(c.Request.Context(), runtime, reqBytes)
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 
 	// Set HTTP status code
