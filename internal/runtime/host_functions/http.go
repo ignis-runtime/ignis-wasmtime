@@ -26,16 +26,16 @@ func LinkHTTPFunctions(store *wasmtime.Store, linker *wasmtime.Linker) error {
 
 		// Define the structures for HTTP requests/responses
 		type HostHTTPRequest struct {
-			Method  string      `json:"method"`
-			URL     string      `json:"url"`
+			Method  string              `json:"method"`
+			URL     string              `json:"url"`
 			Headers map[string][]string `json:"headers"`
-			Body    []byte      `json:"body"`
+			Body    []byte              `json:"body"`
 		}
 
 		type HostHTTPResponse struct {
-			StatusCode int                    `json:"status_code"`
-			Headers    map[string][]string    `json:"headers"`
-			Body       []byte                 `json:"body"`
+			StatusCode int                 `json:"status_code"`
+			Headers    map[string][]string `json:"headers"`
+			Body       []byte              `json:"body"`
 		}
 
 		// Unmarshal the request.
@@ -98,4 +98,3 @@ func LinkHTTPFunctions(store *wasmtime.Store, linker *wasmtime.Linker) error {
 		return int32(len(respBytes))
 	})
 }
-

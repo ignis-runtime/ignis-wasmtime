@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/ignis-runtime/ignis-wasmtime/internal/models"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/runtime/host_functions"
 
 	"github.com/bytecodealliance/wasmtime-go/v41"
@@ -17,6 +18,10 @@ const SharedMemDir = "/dev/shm"
 type Runtime interface {
 	Execute(ctx context.Context, fdrequest any) ([]byte, error)
 	Close(ctx context.Context) error
+}
+type RuntimeConfig interface {
+	Type() models.RuntimeType
+	Instantiate() (Runtime, error)
 }
 
 // Session represents a single execution context.
@@ -145,7 +150,7 @@ func (s *Session) getPreopenDir() (string, error) {
 	return os.Getwd()
 }
 
-// Cleanup ensures /dev/shm doesn't leak memory.
+// Cleanup ensures /dev/shm doesn't leak memory and the wasmtime engine is closed.
 func (s *Session) Cleanup() {
 	if s.Stdin != nil {
 		s.Stdin.Close()
@@ -154,5 +159,11 @@ func (s *Session) Cleanup() {
 	if s.Stdout != nil {
 		s.Stdout.Close()
 		os.Remove(s.Stdout.Name())
+	}
+	if s.Engine != nil {
+		s.Engine.Close()
+	}
+	if s.Module != nil {
+		s.Module.Close()
 	}
 }

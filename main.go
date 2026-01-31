@@ -2,12 +2,13 @@ package main
 
 import (
 	_ "embed"
-	"io"
 	"log"
 	"os"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/ignis-runtime/ignis-wasmtime/internal/cache"
+	"github.com/ignis-runtime/ignis-wasmtime/internal/config"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/runtime/js"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/runtime/wasm"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/server"
@@ -17,33 +18,29 @@ import (
 var qjsWasmBytes []byte
 
 func main() {
-	// Read the default JS content for the factory
+	// Initialize Redis cache
+	cfg := config.GetConfig()
+	redisCache := cache.NewRedisCache(cfg.RedisAddr)
+
 	var jsContent []byte
-	jsFile, err := os.Open("./example/js/index-page/example.js")
-	if err == nil {
-		jsContent, _ = io.ReadAll(jsFile)
-		jsFile.Close()
-	}
-	var goContent []byte
-	gofile, err := os.Open("./example/go/index-page/example.wasm")
-	if err == nil {
-		goContent, _ = io.ReadAll(gofile)
-		gofile.Close()
-	}
-	jsRt, err := js.NewJsRuntime(uuid.MustParse("cdda4d36-8943-4033-9caa-e60f89574060"), jsContent).
-		Build()
+	jsContent, err := os.ReadFile("./example/js/index-page/example.js")
 	if err != nil {
-		log.Fatalf("error while creating js runtime: %v\n", err)
-	}
-	goRt, err := wasm.NewWasmRuntime(uuid.MustParse("cdda4d36-8943-4033-9caa-e60f89574061"), goContent).
-		WithPreopenedDir("./example").
-		Build()
-	if err != nil {
-		log.Fatalf("error while creating go runtime: %v\n", err)
+		log.Println("failed to read js file: ", err)
 	}
 
-	server.RegisterRuntime(uuid.MustParse("cdda4d36-8943-4033-9caa-e60f89574060"), jsRt)
-	server.RegisterRuntime(uuid.MustParse("cdda4d36-8943-4033-9caa-e60f89574061"), goRt)
+	var goContent []byte
+	goContent, err = os.ReadFile("./example/go/index-page/example.wasm")
+	if err != nil {
+		log.Println("failed to read wasm file: ", err)
+	}
+	jsRuntimeConfig := js.NewRuntimeConfig(uuid.MustParse("cdda4d36-8943-4033-9caa-e60f89574060"), jsContent).
+		WithCache(redisCache)
+	goRuntimeConfig := wasm.NewRuntimeConfig(uuid.MustParse("cdda4d36-8943-4033-9caa-e60f89574061"), goContent).
+		WithPreopenedDir("./example").
+		WithCache(redisCache)
+
+	server.RegisterRuntimeConfigs(uuid.MustParse("cdda4d36-8943-4033-9caa-e60f89574060"), jsRuntimeConfig)
+	server.RegisterRuntimeConfigs(uuid.MustParse("cdda4d36-8943-4033-9caa-e60f89574061"), goRuntimeConfig)
 
 	// Setup Gin router
 	router := gin.Default()
@@ -57,7 +54,6 @@ func main() {
 		// Validate UUID format before calling HandleWasmRequest
 		parsedUUID, err := uuid.Parse(runtimeID)
 		if err != nil {
-			// If not a valid UUID, return 404 to avoid processing non-runtime requests
 			c.JSON(404, gin.H{"error": "Not Found"})
 			return
 		}

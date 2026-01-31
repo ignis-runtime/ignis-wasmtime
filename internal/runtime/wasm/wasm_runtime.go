@@ -5,11 +5,21 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"time"
 
+	"github.com/ignis-runtime/ignis-wasmtime/internal/cache"
+	"github.com/ignis-runtime/ignis-wasmtime/internal/models"
 	"github.com/ignis-runtime/ignis-wasmtime/internal/runtime"
+	"github.com/ignis-runtime/ignis-wasmtime/types"
 
 	"github.com/bytecodealliance/wasmtime-go/v41"
+	"github.com/cespare/xxhash/v2"
 	"github.com/google/uuid"
+)
+
+const (
+	cacheKeyFormat = "wasm:%s"
 )
 
 type WasmRuntime struct {
@@ -18,17 +28,18 @@ type WasmRuntime struct {
 }
 
 // RuntimeBuilder handles the configuration of a WasmRuntime
-type runtimeBuilder struct {
+type runtimeConfig struct {
 	id           uuid.UUID
 	wasmModule   []byte
 	preopenedDir string
 	args         []string
+	cache        *cache.RedisCache
 	err          error
 }
 
 // NewBuilder initializes a new builder with required fields
-func NewWasmRuntime(id uuid.UUID, wasmModule []byte) *runtimeBuilder {
-	b := &runtimeBuilder{id: id, wasmModule: wasmModule}
+func NewRuntimeConfig(id uuid.UUID, wasmModule []byte) *runtimeConfig {
+	b := &runtimeConfig{id: id, wasmModule: wasmModule}
 	if wasmModule == nil {
 		b.err = fmt.Errorf("wasm module not provided")
 	}
@@ -38,18 +49,27 @@ func NewWasmRuntime(id uuid.UUID, wasmModule []byte) *runtimeBuilder {
 	return b
 }
 
-func (b *runtimeBuilder) WithPreopenedDir(dir string) *runtimeBuilder {
+func (b *runtimeConfig) WithPreopenedDir(dir string) *runtimeConfig {
 	b.preopenedDir = dir
 	return b
 }
 
-func (b *runtimeBuilder) WithArgs(args []string) *runtimeBuilder {
+func (b *runtimeConfig) WithArgs(args []string) *runtimeConfig {
 	b.args = args
 	return b
 }
 
-// Build finalizes the construction and performs the heavy initialization
-func (b *runtimeBuilder) Build() (runtime.Runtime, error) {
+func (b *runtimeConfig) WithCache(cache *cache.RedisCache) *runtimeConfig {
+	b.cache = cache
+	return b
+}
+
+func (b *runtimeConfig) Type() models.RuntimeType {
+	return models.RuntimeTypeWASM
+}
+
+// Instantiate finalizes the construction and performs the heavy initialization
+func (b *runtimeConfig) Instantiate() (runtime.Runtime, error) {
 	if b.err != nil {
 		return nil, b.err
 	}
@@ -61,14 +81,52 @@ func (b *runtimeBuilder) Build() (runtime.Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("io setup failed: %w", err)
 	}
+	var module *wasmtime.Module
+	var cacheKey string
+	var hash string
+	if b.cache != nil {
+		if b.cache != nil {
+			hash = strconv.FormatUint(xxhash.Sum64(b.wasmModule), 16)
+			cacheKey = fmt.Sprintf(cacheKeyFormat, b.id)
 
-	// Compile the module
-	module, err := wasmtime.NewModule(engine, b.wasmModule)
-	if err != nil {
-		// Cleanup IO if module compilation fails
-		stdinFile.Close()
-		stdoutFile.Close()
-		return nil, fmt.Errorf("module compilation failed: %w", err)
+			cachedModule, err := b.cache.Get(context.Background(), cacheKey)
+			if err != nil {
+				// Log the error but proceed to compile
+				fmt.Printf("Cache get error: %v\n", err)
+			}
+
+			if cachedModule != nil {
+				module, err = wasmtime.NewModuleDeserialize(engine, cachedModule.Data)
+				if err != nil {
+					fmt.Printf("Cache deserialize error: %v\n", err)
+				}
+			}
+		}
+	}
+
+	if module == nil {
+		var err error
+		module, err = wasmtime.NewModule(engine, b.wasmModule)
+		if err != nil {
+			stdinFile.Close()
+			stdoutFile.Close()
+			return nil, fmt.Errorf("module compilation failed: %w", err)
+		}
+
+		if b.cache != nil {
+			serializedModule, err := module.Serialize()
+			if err != nil {
+				fmt.Printf("Module serialize error: %v\n", err)
+			} else {
+				err := b.cache.Set(context.Background(), cacheKey, &types.Module{
+					Hash: hash,
+					Data: serializedModule,
+				}, 24*time.Hour)
+				if err != nil {
+					fmt.Printf("Cache set error: %v\n", err)
+				}
+			}
+		}
 	}
 
 	return &WasmRuntime{

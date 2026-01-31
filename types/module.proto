@@ -1,0 +1,9 @@
+syntax = "proto3";
+package types;
+
+option go_package = "ignis-wasmtime/types";
+
+message Module {
+  string hash = 1;
+  bytes data = 2;
+}

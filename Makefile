@@ -9,7 +9,7 @@ tcp-logger: proto
 	@GOOS=wasip1 GOARCH=wasm go build -o example/go/tcp-example/tcp_logger.wasm example/go/tcp-example/tcp_logger.go
 
 proto:
-	@protoc --go_out=. --go_opt=paths=source_relative --proto_path=. types/types.proto
+	@buf generate
 
 clean:
 	rm -rf $(BUILD_DIR)
